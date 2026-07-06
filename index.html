@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>ControlMaster · Escáner</title>
+<style>
+:root{
+  --bg:#07090d;--bg2:#0d1117;--bg3:#131920;
+  --green:#00e87a;--border-g:rgba(0,232,122,0.18);
+  --text:#f0f4f8;--text-dim:#7a8a9a;--red:#ff6b6b;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;}
+body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--text);
+  display:flex;flex-direction:column;height:100dvh;overflow:hidden;}
+.top{height:52px;display:flex;align-items:center;gap:10px;padding:0 14px;
+  background:var(--bg);border-bottom:1px solid rgba(255,255,255,.07);flex-shrink:0;}
+.top .logo{font-size:14px;font-weight:900;letter-spacing:1px;}
+.top .logo span{color:var(--green);}
+.top .sep{flex:1;}
+.btn-x{width:36px;height:36px;border-radius:9px;border:1px solid rgba(255,255,255,.1);
+  background:var(--bg3);color:var(--text);font-size:16px;cursor:pointer;}
+.stage{flex:1;position:relative;background:#000;overflow:hidden;}
+#video{width:100%;height:100%;object-fit:cover;display:block;}
+.frame{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;}
+.box{width:78%;max-width:340px;aspect-ratio:1.5/1;position:relative;
+  box-shadow:0 0 0 3000px rgba(0,0,0,.45);border-radius:14px;}
+.box::before,.box::after,.box i::before,.box i::after{content:"";position:absolute;
+  width:28px;height:28px;border:3px solid var(--green);}
+.box::before{top:-2px;left:-2px;border-right:0;border-bottom:0;border-radius:14px 0 0 0;}
+.box::after{top:-2px;right:-2px;border-left:0;border-bottom:0;border-radius:0 14px 0 0;}
+.box i::before{bottom:-2px;left:-2px;border-right:0;border-top:0;border-radius:0 0 0 14px;}
+.box i::after{bottom:-2px;right:-2px;border-left:0;border-top:0;border-radius:0 0 14px 0;}
+.laser{position:absolute;top:50%;left:16%;right:16%;height:2px;background:var(--green);
+  box-shadow:0 0 8px var(--green);animation:scan 2s ease-in-out infinite;}
+@keyframes scan{0%,100%{transform:translateY(-52px);}50%{transform:translateY(52px);}}
+.hint{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:13px;
+  color:#cfeede;text-shadow:0 1px 4px #000;padding:0 16px;}
+.feedback{flex-shrink:0;min-height:58px;display:flex;align-items:center;justify-content:center;
+  padding:10px 16px;font-size:15px;font-weight:700;text-align:center;background:var(--bg2);
+  border-top:1px solid rgba(255,255,255,.07);transition:background .2s;word-break:break-word;}
+.feedback.ok{background:rgba(0,232,122,.14);color:var(--green);}
+.feedback.err{background:rgba(255,107,107,.14);color:var(--red);}
+.overlay{position:absolute;inset:0;z-index:5;background:var(--bg);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;padding:26px;gap:14px;}
+.overlay h2{font-size:17px;font-weight:800;}
+.overlay p{font-size:14px;color:var(--text-dim);line-height:1.5;max-width:300px;}
+.overlay button{margin-top:4px;padding:13px 26px;border:none;border-radius:10px;
+  background:var(--green);color:#07090d;font-weight:800;font-size:15px;cursor:pointer;}
+</style>
+</head>
+<body>
+  <div class="top">
+    <div class="logo">CONTROL<span>MASTER</span></div>
+    <div class="sep"></div>
+    <button class="btn-x" onclick="cerrar()" title="Cerrar">&#10005;</button>
+  </div>
+
+  <div class="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="frame"><div class="box"><i></i></div></div>
+    <div class="laser"></div>
+    <div class="hint">Apunta la cámara al código de barras</div>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle">📷 Escáner de productos</h2>
+      <p id="ovText">Toca el botón para activar la cámara y empezar a escanear.</p>
+      <button id="ovBtn" onclick="iniciar()">Iniciar cámara</button>
+    </div>
+  </div>
+
+  <div class="feedback" id="feedback">Listo para escanear</div>
+
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+const DEDUPE_MS=1500, FB_RESET_MS=2200;
+let reader=null, lastCode="", lastTs=0, audioCtx=null, scanning=false;
+function $(id){return document.getElementById(id);}
+
+function overlay(title,text,btn){
+  $("ovTitle").textContent=title; $("ovText").textContent=text||"";
+  const b=$("ovBtn");
+  if(btn){ b.textContent=btn; b.style.display="inline-block"; } else { b.style.display="none"; }
+  $("overlay").style.display="flex";
+}
+function hideOverlay(){ $("overlay").style.display="none"; }
+
+function unlockAudio(){
+  try{ audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==="suspended") audioCtx.resume(); }catch(e){}
+}
+function beep(ok){
+  try{ unlockAudio();
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type="sine"; o.frequency.value=ok?880:210;
+    g.gain.setValueAtTime(.0001,audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.28,audioCtx.currentTime+.01);
+    g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.18);
+    o.start(); o.stop(audioCtx.currentTime+.19);
+  }catch(e){}
+}
+function feedback(txt,cls){ const f=$("feedback"); f.textContent=txt; f.className="feedback"+(cls?" "+cls:""); }
+function resetFeedbackSoon(){ clearTimeout(window._fbT); window._fbT=setTimeout(()=>feedback("Listo para escanear"),FB_RESET_MS); }
+
+// Envía un código detectado al módulo de Ventas (ventana que abrió este escáner)
+function enviarCodigo(code){
+  const now=Date.now();
+  if(code===lastCode && (now-lastTs)<DEDUPE_MS) return;   // evita disparar el mismo código muchas veces seguidas
+  lastCode=code; lastTs=now;
+  beep(true); feedback("↑ "+code);
+  if(window.opener && !window.opener.closed){
+    try{ window.opener.postMessage({source:"cm-scanner",code:code},"*"); }
+    catch(e){ feedback("No se pudo enviar a ControlMaster","err"); }
+  } else { feedback("Sin conexión con ControlMaster","err"); }
+}
+
+// Respuesta desde Ventas: producto agregado (ok) o no encontrado
+window.addEventListener("message",e=>{
+  const d=e.data; if(!d || d.source!=="cm-host") return;
+  if(d.ok){ feedback("✅ "+(d.label||"Agregado"),"ok"); }
+  else { beep(false); feedback("❌ No encontrado: "+(d.code||""),"err"); }
+  resetFeedbackSoon();
+});
+
+function handleCamError(err){
+  scanning=false;
+  let msg="No se pudo acceder a la cámara.";
+  if(err && (err.name==="NotAllowedError"||err.name==="SecurityError"))
+    msg="Permiso de cámara denegado. Actívalo en los ajustes del navegador y toca Reintentar.";
+  else if(err && err.name==="NotFoundError") msg="No se encontró ninguna cámara en el dispositivo.";
+  overlay("Cámara no disponible",msg,"Reintentar");
+}
+
+function iniciar(){
+  if(scanning) return;
+  if(!window.opener){
+    overlay("Abre el escáner desde Ventas",
+      "Esta pantalla debe abrirse con el botón «Escanear» dentro de ControlMaster para poder cargar los productos.","");
+    return;
+  }
+  if(typeof ZXing==="undefined"){
+    overlay("Error al cargar","No se pudo cargar el lector. Revisa tu conexión e inténtalo de nuevo.","Reintentar");
+    return;
+  }
+  unlockAudio(); hideOverlay(); feedback("Iniciando cámara…");
+  const hints=new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
+    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.ITF,    ZXing.BarcodeFormat.QR_CODE
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
+  reader=new ZXing.BrowserMultiFormatReader(hints,150);
+  reader.decodeFromConstraints(
+      { video:{ facingMode:{ ideal:"environment" } } },
+      $("video"),
+      (result)=>{ if(result) enviarCodigo(result.getText()); }
+    )
+    .then(()=>{ scanning=true; feedback("Listo para escanear"); })
+    .catch(handleCamError);
+}
+
+function cerrar(){ try{ reader && reader.reset(); }catch(e){} window.close(); }
+window.addEventListener("pagehide",()=>{ try{ reader && reader.reset(); }catch(e){} });
+</script>
+</body>
+</html>
