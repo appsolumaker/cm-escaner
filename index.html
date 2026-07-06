@@ -24,19 +24,23 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
 .stage{flex:1;position:relative;background:#000;overflow:hidden;}
 #video{width:100%;height:100%;object-fit:cover;display:block;}
 .frame{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;}
-.box{width:78%;max-width:340px;aspect-ratio:1.5/1;position:relative;
-  box-shadow:0 0 0 3000px rgba(0,0,0,.45);border-radius:14px;}
+.box{width:82%;max-width:360px;aspect-ratio:1.7/1;position:relative;
+  box-shadow:0 0 0 3000px rgba(0,0,0,.42);border-radius:14px;}
 .box::before,.box::after,.box i::before,.box i::after{content:"";position:absolute;
   width:28px;height:28px;border:3px solid var(--green);}
 .box::before{top:-2px;left:-2px;border-right:0;border-bottom:0;border-radius:14px 0 0 0;}
 .box::after{top:-2px;right:-2px;border-left:0;border-bottom:0;border-radius:0 14px 0 0;}
 .box i::before{bottom:-2px;left:-2px;border-right:0;border-top:0;border-radius:0 0 0 14px;}
 .box i::after{bottom:-2px;right:-2px;border-left:0;border-top:0;border-radius:0 0 14px 0;}
-.laser{position:absolute;top:50%;left:16%;right:16%;height:2px;background:var(--green);
+.laser{position:absolute;top:50%;left:14%;right:14%;height:2px;background:var(--green);
   box-shadow:0 0 8px var(--green);animation:scan 2s ease-in-out infinite;}
-@keyframes scan{0%,100%{transform:translateY(-52px);}50%{transform:translateY(52px);}}
+@keyframes scan{0%,100%{transform:translateY(-46px);}50%{transform:translateY(46px);}}
 .hint{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:13px;
   color:#cfeede;text-shadow:0 1px 4px #000;padding:0 16px;}
+.btn-torch{position:absolute;top:12px;right:12px;width:46px;height:46px;border-radius:50%;
+  border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.5);color:#fff;font-size:20px;
+  cursor:pointer;display:none;align-items:center;justify-content:center;}
+.btn-torch.on{background:var(--green);color:#07090d;border-color:var(--green);}
 .feedback{flex-shrink:0;min-height:58px;display:flex;align-items:center;justify-content:center;
   padding:10px 16px;font-size:15px;font-weight:700;text-align:center;background:var(--bg2);
   border-top:1px solid rgba(255,255,255,.07);transition:background .2s;word-break:break-word;}
@@ -62,7 +66,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
     <video id="video" autoplay playsinline muted></video>
     <div class="frame"><div class="box"><i></i></div></div>
     <div class="laser"></div>
-    <div class="hint">Apunta la cámara al código de barras</div>
+    <button class="btn-torch" id="btnTorch" onclick="toggleTorch()" title="Linterna">🔦</button>
+    <div class="hint">Acerca el código a ~15 cm y espera a que enfoque</div>
     <div class="overlay" id="overlay">
       <h2 id="ovTitle">📷 Escáner de productos</h2>
       <p id="ovText">Toca el botón para activar la cámara y empezar a escanear.</p>
@@ -74,8 +79,9 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const DEDUPE_MS=1500, FB_RESET_MS=2200;
-let reader=null, lastCode="", lastTs=0, audioCtx=null, scanning=false;
+const DEDUPE_MS=1500, FB_RESET_MS=2200, DETECT_MS=110;
+let running=false, stream=null, track=null, detector=null, reader=null, loopId=null;
+let lastCode="", lastTs=0, audioCtx=null, torchOn=false;
 function $(id){return document.getElementById(id);}
 
 function overlay(title,text,btn){
@@ -104,11 +110,11 @@ function beep(ok){
 function feedback(txt,cls){ const f=$("feedback"); f.textContent=txt; f.className="feedback"+(cls?" "+cls:""); }
 function resetFeedbackSoon(){ clearTimeout(window._fbT); window._fbT=setTimeout(()=>feedback("Listo para escanear"),FB_RESET_MS); }
 
-// Envía un código detectado al módulo de Ventas (ventana que abrió este escáner).
-// Si se abrió directo (modo prueba), solo muestra el código en pantalla.
+// Un código detectado: lo manda a Ventas, o (modo prueba) lo muestra en pantalla.
 function enviarCodigo(code){
+  code=String(code||"").trim(); if(!code) return;
   const now=Date.now();
-  if(code===lastCode && (now-lastTs)<DEDUPE_MS) return;   // evita disparar el mismo código muchas veces seguidas
+  if(code===lastCode && (now-lastTs)<DEDUPE_MS) return;
   lastCode=code; lastTs=now;
   beep(true);
   if(window.opener && !window.opener.closed){
@@ -116,7 +122,6 @@ function enviarCodigo(code){
     try{ window.opener.postMessage({source:"cm-scanner",code:code},"*"); }
     catch(e){ feedback("No se pudo enviar a ControlMaster","err"); }
   } else {
-    // Modo prueba: abierto directamente, sin Ventas. Solo mostramos lo leído.
     feedback("🔍 Leído: "+code+"  (abre desde Ventas para cargarlo)","ok");
     resetFeedbackSoon();
   }
@@ -131,7 +136,7 @@ window.addEventListener("message",e=>{
 });
 
 function handleCamError(err){
-  scanning=false;
+  stopAll();
   let msg="No se pudo acceder a la cámara.";
   if(err && (err.name==="NotAllowedError"||err.name==="SecurityError"))
     msg="Permiso de cámara denegado. Actívalo en los ajustes del navegador y toca Reintentar.";
@@ -139,13 +144,43 @@ function handleCamError(err){
   overlay("Cámara no disponible",msg,"Reintentar");
 }
 
-function iniciar(){
-  if(scanning) return;
-  if(typeof ZXing==="undefined"){
-    overlay("Error al cargar","No se pudo cargar el lector. Revisa tu conexión e inténtalo de nuevo.","Reintentar");
-    return;
-  }
-  unlockAudio(); hideOverlay(); feedback("Iniciando cámara…");
+// ── LINTERNA ──
+function setupTorch(){
+  try{
+    const caps=track && track.getCapabilities ? track.getCapabilities() : {};
+    if(caps && caps.torch){ $("btnTorch").style.display="flex"; }
+  }catch(e){}
+}
+function toggleTorch(){
+  if(!track) return;
+  torchOn=!torchOn;
+  track.applyConstraints({advanced:[{torch:torchOn}]})
+    .then(()=>{ $("btnTorch").classList.toggle("on",torchOn); })
+    .catch(()=>{ torchOn=!torchOn; });
+}
+
+// ── LECTOR NATIVO (Android Chrome y otros) ──
+async function crearDetector(){
+  if(!("BarcodeDetector" in window)) return null;
+  try{
+    const sop = await window.BarcodeDetector.getSupportedFormats();
+    if(!sop || !sop.length) return null;
+    const want=["ean_13","ean_8","upc_a","upc_e","code_128","code_39","itf","qr_code"].filter(f=>sop.includes(f));
+    return new window.BarcodeDetector(want.length?{formats:want}:undefined);
+  }catch(e){ return null; }
+}
+async function loopNativo(){
+  if(!running) return;
+  try{
+    const found = await detector.detect($("video"));
+    if(found && found.length) enviarCodigo(found[0].rawValue);
+  }catch(e){}
+  loopId=setTimeout(loopNativo,DETECT_MS);
+}
+
+// ── RESPALDO ZXing (iPhone / Safari, sin lector nativo) ──
+function iniciarZxing(){
+  if(typeof ZXing==="undefined"){ overlay("Error al cargar","No se pudo cargar el lector. Revisa tu conexión.","Reintentar"); return; }
   const hints=new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
     ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
@@ -154,18 +189,59 @@ function iniciar(){
     ZXing.BarcodeFormat.ITF,    ZXing.BarcodeFormat.QR_CODE
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  reader=new ZXing.BrowserMultiFormatReader(hints,150);
+  reader=new ZXing.BrowserMultiFormatReader(hints,120);
   reader.decodeFromConstraints(
-      { video:{ facingMode:{ ideal:"environment" } } },
+      { video:{ facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080} } },
       $("video"),
       (result)=>{ if(result) enviarCodigo(result.getText()); }
     )
-    .then(()=>{ scanning=true; feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓"); })
+    .then(()=>{ running=true; feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓"); })
     .catch(handleCamError);
 }
 
-function cerrar(){ try{ reader && reader.reset(); }catch(e){} window.close(); }
-window.addEventListener("pagehide",()=>{ try{ reader && reader.reset(); }catch(e){} });
+async function iniciar(){
+  if(running) return;
+  unlockAudio(); hideOverlay(); feedback("Iniciando cámara…");
+
+  detector = await crearDetector();
+
+  if(detector){
+    // Camino nativo: gestionamos la cámara en alta resolución + enfoque continuo
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio:false,
+        video:{ facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080} }
+      });
+    }catch(err){ handleCamError(err); return; }
+    const v=$("video"); v.srcObject=stream;
+    try{ await v.play(); }catch(e){}
+    track = stream.getVideoTracks()[0];
+    try{
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if(caps.focusMode && caps.focusMode.includes("continuous"))
+        await track.applyConstraints({advanced:[{focusMode:"continuous"}]});
+    }catch(e){}
+    setupTorch();
+    running=true;
+    feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓");
+    loopNativo();
+  } else {
+    // Camino respaldo (iOS/Safari): ZXing gestiona la cámara
+    iniciarZxing();
+    setTimeout(()=>{ try{ if(reader && reader.stream){ track=reader.stream.getVideoTracks()[0]; setupTorch(); } }catch(e){} }, 800);
+  }
+}
+
+function stopAll(){
+  running=false;
+  clearTimeout(loopId);
+  try{ reader && reader.reset(); }catch(e){}
+  reader=null; detector=null;
+  if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){} stream=null; }
+  track=null; torchOn=false;
+}
+function cerrar(){ stopAll(); window.close(); }
+window.addEventListener("pagehide",stopAll);
 </script>
 </body>
 </html>
