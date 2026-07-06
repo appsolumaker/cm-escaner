@@ -104,16 +104,22 @@ function beep(ok){
 function feedback(txt,cls){ const f=$("feedback"); f.textContent=txt; f.className="feedback"+(cls?" "+cls:""); }
 function resetFeedbackSoon(){ clearTimeout(window._fbT); window._fbT=setTimeout(()=>feedback("Listo para escanear"),FB_RESET_MS); }
 
-// Envía un código detectado al módulo de Ventas (ventana que abrió este escáner)
+// Envía un código detectado al módulo de Ventas (ventana que abrió este escáner).
+// Si se abrió directo (modo prueba), solo muestra el código en pantalla.
 function enviarCodigo(code){
   const now=Date.now();
   if(code===lastCode && (now-lastTs)<DEDUPE_MS) return;   // evita disparar el mismo código muchas veces seguidas
   lastCode=code; lastTs=now;
-  beep(true); feedback("↑ "+code);
+  beep(true);
   if(window.opener && !window.opener.closed){
+    feedback("↑ "+code);
     try{ window.opener.postMessage({source:"cm-scanner",code:code},"*"); }
     catch(e){ feedback("No se pudo enviar a ControlMaster","err"); }
-  } else { feedback("Sin conexión con ControlMaster","err"); }
+  } else {
+    // Modo prueba: abierto directamente, sin Ventas. Solo mostramos lo leído.
+    feedback("🔍 Leído: "+code+"  (abre desde Ventas para cargarlo)","ok");
+    resetFeedbackSoon();
+  }
 }
 
 // Respuesta desde Ventas: producto agregado (ok) o no encontrado
@@ -135,11 +141,6 @@ function handleCamError(err){
 
 function iniciar(){
   if(scanning) return;
-  if(!window.opener){
-    overlay("Abre el escáner desde Ventas",
-      "Esta pantalla debe abrirse con el botón «Escanear» dentro de ControlMaster para poder cargar los productos.","");
-    return;
-  }
   if(typeof ZXing==="undefined"){
     overlay("Error al cargar","No se pudo cargar el lector. Revisa tu conexión e inténtalo de nuevo.","Reintentar");
     return;
@@ -159,7 +160,7 @@ function iniciar(){
       $("video"),
       (result)=>{ if(result) enviarCodigo(result.getText()); }
     )
-    .then(()=>{ scanning=true; feedback("Listo para escanear"); })
+    .then(()=>{ scanning=true; feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓"); })
     .catch(handleCamError);
 }
 
