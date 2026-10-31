@@ -67,7 +67,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
     <div class="frame"><div class="box"><i></i></div></div>
     <div class="laser"></div>
     <button class="btn-torch" id="btnTorch" onclick="toggleTorch()" title="Linterna">🔦</button>
-    <div class="hint">Acerca el código a ~15 cm y espera a que enfoque</div>
+    <div class="hint">Pon el código dentro del recuadro, a unos 20 cm, y espera a que enfoque</div>
     <div class="overlay" id="overlay">
       <h2 id="ovTitle">📷 Escáner de productos</h2>
       <p id="ovText">Toca el botón para activar la cámara y empezar a escanear.</p>
@@ -79,8 +79,9 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const DEDUPE_MS=1500, FB_RESET_MS=2200, DETECT_MS=110;
-let running=false, stream=null, track=null, detector=null, reader=null, loopId=null;
+const DEDUPE_MS=1500, FB_RESET_MS=2200, DETECT_MS=110, ZX_MS=150, ZX_MAX_ANCHO=1280;
+let running=false, stream=null, track=null, detector=null, loopId=null, motor="";
+let zxReader=null, zxCanvas=null, zxCtx=null, erroresNativo=0;
 let lastCode="", lastTs=0, audioCtx=null, torchOn=false;
 function $(id){return document.getElementById(id);}
 
@@ -108,7 +109,12 @@ function beep(ok){
   }catch(e){}
 }
 function feedback(txt,cls){ const f=$("feedback"); f.textContent=txt; f.className="feedback"+(cls?" "+cls:""); }
-function resetFeedbackSoon(){ clearTimeout(window._fbT); window._fbT=setTimeout(()=>feedback("Listo para escanear"),FB_RESET_MS); }
+function resetFeedbackSoon(){ clearTimeout(window._fbT); window._fbT=setTimeout(()=>feedback(textoListo()),FB_RESET_MS); }
+function textoListo(){
+  if(window.opener) return "Listo para escanear";
+  const v=$("video");
+  return "Modo prueba: cámara activa ✓ (lector "+(motor||"-")+" · "+(v.videoWidth||0)+"×"+(v.videoHeight||0)+")";
+}
 
 // Un código detectado: lo manda a Ventas, o (modo prueba) lo muestra en pantalla.
 function enviarCodigo(code){
@@ -139,8 +145,9 @@ function handleCamError(err){
   stopAll();
   let msg="No se pudo acceder a la cámara.";
   if(err && (err.name==="NotAllowedError"||err.name==="SecurityError"))
-    msg="Permiso de cámara denegado. Actívalo en los ajustes del navegador y toca Reintentar.";
+    msg="Permiso de cámara denegado. En iPhone: Ajustes → Safari → Cámara → Permitir, y toca Reintentar.";
   else if(err && err.name==="NotFoundError") msg="No se encontró ninguna cámara en el dispositivo.";
+  else if(err && err.name==="NotReadableError") msg="Otra app está usando la cámara. Ciérrala y toca Reintentar.";
   overlay("Cámara no disponible",msg,"Reintentar");
 }
 
@@ -170,17 +177,31 @@ async function crearDetector(){
   }catch(e){ return null; }
 }
 async function loopNativo(){
-  if(!running) return;
-  try{
-    const found = await detector.detect($("video"));
-    if(found && found.length) enviarCodigo(found[0].rawValue);
-  }catch(e){}
-  loopId=setTimeout(loopNativo,DETECT_MS);
+  if(!running || !detector) return;
+  const v=$("video");
+  if(v.readyState>=2 && v.videoWidth>0){
+    try{
+      const found = await detector.detect(v);
+      erroresNativo=0;
+      if(found && found.length) enviarCodigo(found[0].rawValue);
+    }catch(e){
+      // Si el lector nativo falla seguido (p. ej. activado a medias en Safari), pasamos a ZXing con la misma cámara
+      if(++erroresNativo>=5){ detector=null; iniciarZxing(); return; }
+    }
+  }
+  if(running && detector) loopId=setTimeout(loopNativo,DETECT_MS);
 }
 
 // ── RESPALDO ZXing (iPhone / Safari, sin lector nativo) ──
+// Usamos la cámara que ya abrimos y leemos solo la zona del recuadro de cada cuadro.
+// El tamaño del lienzo se ajusta en cada cuadro (en iPhone el video arranca en 0×0 y luego rota),
+// y cualquier error deja el ciclo vivo en vez de detenerlo.
 function iniciarZxing(){
-  if(typeof ZXing==="undefined"){ overlay("Error al cargar","No se pudo cargar el lector. Revisa tu conexión.","Reintentar"); return; }
+  if(typeof ZXing==="undefined"){
+    stopAll();
+    overlay("Error al cargar","No se pudo cargar el lector de códigos. Revisa tu conexión a internet y toca Reintentar.","Reintentar");
+    return false;
+  }
   const hints=new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
     ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
@@ -189,59 +210,88 @@ function iniciarZxing(){
     ZXing.BarcodeFormat.ITF,    ZXing.BarcodeFormat.QR_CODE
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  reader=new ZXing.BrowserMultiFormatReader(hints,120);
-  reader.decodeFromConstraints(
-      { video:{ facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080} } },
-      $("video"),
-      (result)=>{ if(result) enviarCodigo(result.getText()); }
-    )
-    .then(()=>{ running=true; feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓"); })
-    .catch(handleCamError);
+  zxReader=new ZXing.MultiFormatReader();
+  zxReader.setHints(hints);
+  zxCanvas=document.createElement("canvas");
+  try{ zxCtx=zxCanvas.getContext("2d",{willReadFrequently:true}); }catch(e){ zxCtx=null; }
+  if(!zxCtx) zxCtx=zxCanvas.getContext("2d");
+  motor="ZXing";
+  loopZxing();
+  return true;
+}
+function loopZxing(){
+  if(!running || !zxReader) return;
+  const v=$("video"), vw=v.videoWidth, vh=v.videoHeight;
+  if(v.readyState>=2 && vw>0 && vh>0){
+    try{
+      const cw=Math.round(vw*0.9), ch=Math.round(Math.min(vh, cw*0.75));
+      const sx=Math.round((vw-cw)/2), sy=Math.round((vh-ch)/2);
+      const esc=Math.min(1, ZX_MAX_ANCHO/cw);
+      const dw=Math.round(cw*esc), dh=Math.round(ch*esc);
+      if(zxCanvas.width!==dw || zxCanvas.height!==dh){ zxCanvas.width=dw; zxCanvas.height=dh; }
+      zxCtx.drawImage(v,sx,sy,cw,ch,0,0,dw,dh);
+      const lum=new ZXing.HTMLCanvasElementLuminanceSource(zxCanvas);
+      const res=zxReader.decodeWithState(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum)));
+      if(res) enviarCodigo(res.getText());
+    }catch(e){ /* "no encontrado" es lo normal en la mayoría de cuadros; seguimos */ }
+  }
+  loopId=setTimeout(loopZxing,ZX_MS);
 }
 
 async function iniciar(){
   if(running) return;
   unlockAudio(); hideOverlay(); feedback("Iniciando cámara…");
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    overlay("Cámara no disponible","Este navegador no permite usar la cámara. En iPhone abre el enlace directamente en Safari (no dentro de Instagram, WhatsApp u otra app).","Reintentar");
+    return;
+  }
+  // Una sola forma de abrir la cámara para los dos lectores
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio:false,
+      video:{ facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080} }
+    });
+  }catch(err){ handleCamError(err); return; }
+  const v=$("video");
+  v.setAttribute("playsinline",""); v.setAttribute("muted",""); v.muted=true;
+  v.srcObject=stream;
+  try{ await v.play(); }catch(e){}
+  track = stream.getVideoTracks()[0];
+  try{
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if(caps.focusMode && caps.focusMode.includes("continuous"))
+      await track.applyConstraints({advanced:[{focusMode:"continuous"}]});
+  }catch(e){}
+  setupTorch();
+  running=true; erroresNativo=0;
 
   detector = await crearDetector();
+  if(detector){ motor="nativo"; loopNativo(); }
+  else if(!iniciarZxing()) return;
 
-  if(detector){
-    // Camino nativo: gestionamos la cámara en alta resolución + enfoque continuo
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio:false,
-        video:{ facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080} }
-      });
-    }catch(err){ handleCamError(err); return; }
-    const v=$("video"); v.srcObject=stream;
-    try{ await v.play(); }catch(e){}
-    track = stream.getVideoTracks()[0];
-    try{
-      const caps = track.getCapabilities ? track.getCapabilities() : {};
-      if(caps.focusMode && caps.focusMode.includes("continuous"))
-        await track.applyConstraints({advanced:[{focusMode:"continuous"}]});
-    }catch(e){}
-    setupTorch();
-    running=true;
-    feedback(window.opener?"Listo para escanear":"Modo prueba: cámara activa ✓");
-    loopNativo();
-  } else {
-    // Camino respaldo (iOS/Safari): ZXing gestiona la cámara
-    iniciarZxing();
-    setTimeout(()=>{ try{ if(reader && reader.stream){ track=reader.stream.getVideoTracks()[0]; setupTorch(); } }catch(e){} }, 800);
-  }
+  feedback(textoListo());
+  setTimeout(()=>{ if(running && $("feedback").className==="feedback") feedback(textoListo()); },1200);
 }
 
 function stopAll(){
   running=false;
   clearTimeout(loopId);
-  try{ reader && reader.reset(); }catch(e){}
-  reader=null; detector=null;
+  zxReader=null; detector=null; motor="";
   if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){} stream=null; }
+  try{ $("video").srcObject=null; }catch(e){}
   track=null; torchOn=false;
+  $("btnTorch").classList.remove("on"); $("btnTorch").style.display="none";
 }
 function cerrar(){ stopAll(); window.close(); }
 window.addEventListener("pagehide",stopAll);
+// iPhone corta la cámara cuando la pestaña pasa a segundo plano (p. ej. al ir a Ventas y volver)
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState!=="visible" || !running) return;
+  if(!track || track.readyState==="ended"){
+    stopAll();
+    overlay("📷 Cámara en pausa","La cámara se detuvo al cambiar de pestaña. Toca para reanudar.","Reanudar");
+  }
+});
 </script>
 </body>
 </html>
