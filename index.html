@@ -148,7 +148,7 @@ function enviarCodigo(code){
 function avisarAgregado(n, texto, prueba){
   const rep=n>1;
   const pre = prueba ? (rep?"🔍 Leído otra vez (van "+n+"): ":"🔍 Leído: ")
-                     : (rep?"➕ Añadido otra vez (van "+n+"): ":"➕ Añadido: ");
+                     : (rep?"➕ Añadido (en factura: "+n+"): ":"➕ Añadido: ");
   feedback(pre+texto, "ok");
   try{ if(navigator.vibrate) navigator.vibrate(rep?[70,60,70]:40); }catch(e){}
   actualizarBtnFin();
@@ -164,10 +164,10 @@ window.addEventListener("message",e=>{
   const code=String(d.code||ultimoEnviado||"");
   if(d.ok){
     totalAnadidos++;
-    avisarAgregado(conteo[code]||1, d.label||code, false);
+    avisarAgregado(Number(d.cant)>0?Number(d.cant):(conteo[code]||1), d.label||code, false);   // cuántas van en la factura
   } else {
     if(conteo[code]) conteo[code]--;
-    beep(false); feedback("❌ No encontrado: "+code+" — no se añadió a la factura","err");
+    beep(false); feedback(d.msg ? "⚠️ "+d.msg : "❌ No encontrado: "+code+" — no se añadió a la factura","err");   // encontrado pero no agregado: dice por qué
     resetFeedbackSoon();
   }
 });
