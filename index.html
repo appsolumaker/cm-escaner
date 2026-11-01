@@ -46,6 +46,15 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
   border-top:1px solid rgba(255,255,255,.07);transition:background .2s;word-break:break-word;}
 .feedback.ok{background:rgba(0,232,122,.14);color:var(--green);}
 .feedback.err{background:rgba(255,107,107,.14);color:var(--red);}
+.feedback.rep{background:rgba(255,176,32,.2);color:#ffb020;}
+.flash{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;font-size:58px;font-weight:900;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.6);}
+.flash.ok{background:rgba(0,232,122,.32);animation:flashAnim .9s ease-out forwards;}
+.flash.rep{background:rgba(255,176,32,.45);animation:flashAnim 1.4s ease-out forwards;}
+@keyframes flashAnim{0%{opacity:1;}60%{opacity:1;}100%{opacity:0;}}
+.bottom{flex-shrink:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg2);}
+.btn-fin{width:100%;padding:14px;border-radius:12px;background:var(--bg3);border:1px solid rgba(255,255,255,.16);
+  color:var(--text);font-size:15px;font-weight:800;cursor:pointer;}
 .overlay{position:absolute;inset:0;z-index:5;background:var(--bg);
   display:flex;flex-direction:column;align-items:center;justify-content:center;
   text-align:center;padding:26px;gap:14px;}
@@ -66,6 +75,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
     <video id="video" autoplay playsinline muted></video>
     <div class="frame"><div class="box"><i></i></div></div>
     <div class="laser"></div>
+    <div class="flash" id="flash"></div>
     <button class="btn-torch" id="btnTorch" onclick="toggleTorch()" title="Linterna">🔦</button>
     <div class="hint">Pon el código dentro del recuadro, a unos 20 cm, y espera a que enfoque</div>
     <div class="overlay" id="overlay">
@@ -76,13 +86,15 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
   </div>
 
   <div class="feedback" id="feedback">Listo para escanear</div>
+  <div class="bottom"><button class="btn-fin" id="btnFin" onclick="cerrar()">✓ Finalizar escaneo</button></div>
 
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
-const DEDUPE_MS=1500, FB_RESET_MS=2200, DETECT_MS=110, ZX_MS=150, ZX_MAX_ANCHO=1280;
+const AUSENTE_MS=1500, FB_RESET_MS=2200, DETECT_MS=110, ZX_MS=150, ZX_MAX_ANCHO=1280;
 let running=false, stream=null, track=null, detector=null, loopId=null, motor="";
 let zxReader=null, zxCanvas=null, zxCtx=null, erroresNativo=0;
-let lastCode="", lastTs=0, audioCtx=null, torchOn=false;
+let lastCode="", lastSeen=0, audioCtx=null, torchOn=false;
+let conteo={}, totalAnadidos=0, ultimoEnviado="";
 function $(id){return document.getElementById(id);}
 
 function overlay(title,text,btn){
@@ -117,30 +129,58 @@ function textoListo(){
 }
 
 // Un código detectado: lo manda a Ventas, o (modo prueba) lo muestra en pantalla.
+// El mismo código solo vuelve a contar si salió del recuadro al menos AUSENTE_MS
+// (antes se volvía a sumar cada 1,5 s si el producto se quedaba frente a la cámara).
 function enviarCodigo(code){
   code=String(code||"").trim(); if(!code) return;
   const now=Date.now();
-  if(code===lastCode && (now-lastTs)<DEDUPE_MS) return;
-  lastCode=code; lastTs=now;
-  beep(true);
+  if(code===lastCode && (now-lastSeen)<AUSENTE_MS){ lastSeen=now; return; }
+  lastCode=code; lastSeen=now;
+  conteo[code]=(conteo[code]||0)+1;
+  ultimoEnviado=code;
+  if(conteo[code]>1){ beep(true); setTimeout(()=>beep(true),150); } else beep(true);
   if(window.opener && !window.opener.closed){
-    feedback("↑ "+code);
+    feedback("↑ Enviando "+code+"…");
     try{ window.opener.postMessage({source:"cm-scanner",code:code},"*"); }
-    catch(e){ feedback("No se pudo enviar a ControlMaster","err"); }
+    catch(e){ conteo[code]--; feedback("No se pudo enviar a ControlMaster. Cierra el escáner y ábrelo de nuevo desde Ventas.","err"); }
   } else {
-    feedback("🔍 Leído: "+code+"  (abre desde Ventas para cargarlo)","ok");
-    resetFeedbackSoon();
+    totalAnadidos++;
+    avisarAgregado(conteo[code], code+" · modo prueba: abre desde Ventas para cargarlo", true);
   }
+}
+
+// Aviso visible de "añadido": destello sobre la cámara + barra de abajo.
+// Si es un código repetido, el aviso es naranja, dice cuántas van y suena doble.
+function avisarAgregado(n, texto, prueba){
+  const rep=n>1;
+  const pre = prueba ? (rep?"🔍 Leído otra vez (van "+n+"): ":"🔍 Leído: ")
+                     : (rep?"➕ Añadido otra vez (van "+n+"): ":"➕ Añadido: ");
+  feedback(pre+texto, rep?"rep":"ok");
+  const f=$("flash");
+  f.className="flash"; void f.offsetWidth;
+  f.textContent = rep ? "+1  ×"+n : "+1";
+  f.className="flash "+(rep?"rep":"ok");
+  try{ if(navigator.vibrate) navigator.vibrate(rep?[70,60,70]:40); }catch(e){}
+  actualizarBtnFin();
+  resetFeedbackSoon();
+}
+function actualizarBtnFin(){
+  $("btnFin").textContent = totalAnadidos ? "✓ Finalizar escaneo ("+totalAnadidos+")" : "✓ Finalizar escaneo";
 }
 
 // Respuesta desde Ventas: producto agregado (ok) o no encontrado
 window.addEventListener("message",e=>{
   const d=e.data; if(!d || d.source!=="cm-host") return;
-  if(d.ok){ feedback("✅ "+(d.label||"Agregado"),"ok"); }
-  else { beep(false); feedback("❌ No encontrado: "+(d.code||""),"err"); }
-  resetFeedbackSoon();
+  const code=String(d.code||ultimoEnviado||"");
+  if(d.ok){
+    totalAnadidos++;
+    avisarAgregado(conteo[code]||1, d.label||code, false);
+  } else {
+    if(conteo[code]) conteo[code]--;
+    beep(false); feedback("❌ No encontrado: "+code+" — no se añadió a la factura","err");
+    resetFeedbackSoon();
+  }
 });
-
 function handleCamError(err){
   stopAll();
   let msg="No se pudo acceder a la cámara.";
@@ -279,10 +319,22 @@ function stopAll(){
   zxReader=null; detector=null; motor="";
   if(stream){ try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){} stream=null; }
   try{ $("video").srcObject=null; }catch(e){}
-  track=null; torchOn=false;
+   track=null; torchOn=false; lastCode="";
   $("btnTorch").classList.remove("on"); $("btnTorch").style.display="none";
 }
-function cerrar(){ stopAll(); window.close(); }
+function cerrar(){
+  const n=totalAnadidos, conVentas=!!window.opener;
+  stopAll();
+  try{ window.close(); }catch(e){}
+  // Si el navegador no deja cerrar la pestaña (p. ej. si se abrió a mano), mostramos el resumen
+  setTimeout(()=>{
+    let txt="";
+    if(n) txt = conVentas ? (n===1?"Se añadió 1 producto. ":"Se añadieron "+n+" productos. ")
+                          : (n===1?"Se leyó 1 código. ":"Se leyeron "+n+" códigos. ");
+    overlay("✓ Escaneo finalizado", txt+"Ya puedes cerrar esta pestaña y volver a Ventas.","Volver a escanear");
+    feedback("Escaneo finalizado");
+  },300);
+}
 window.addEventListener("pagehide",stopAll);
 // iPhone corta la cámara cuando la pestaña pasa a segundo plano (p. ej. al ir a Ventas y volver)
 document.addEventListener("visibilitychange",()=>{
