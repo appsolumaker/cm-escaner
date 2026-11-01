@@ -46,12 +46,6 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
   border-top:1px solid rgba(255,255,255,.07);transition:background .2s;word-break:break-word;}
 .feedback.ok{background:rgba(0,232,122,.14);color:var(--green);}
 .feedback.err{background:rgba(255,107,107,.14);color:var(--red);}
-.feedback.rep{background:rgba(255,176,32,.2);color:#ffb020;}
-.flash{position:absolute;inset:0;z-index:4;display:flex;align-items:center;justify-content:center;
-  pointer-events:none;opacity:0;font-size:58px;font-weight:900;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.6);}
-.flash.ok{background:rgba(0,232,122,.32);animation:flashAnim .9s ease-out forwards;}
-.flash.rep{background:rgba(255,176,32,.45);animation:flashAnim 1.4s ease-out forwards;}
-@keyframes flashAnim{0%{opacity:1;}60%{opacity:1;}100%{opacity:0;}}
 .bottom{flex-shrink:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg2);}
 .btn-fin{width:100%;padding:14px;border-radius:12px;background:var(--bg3);border:1px solid rgba(255,255,255,.16);
   color:var(--text);font-size:15px;font-weight:800;cursor:pointer;}
@@ -75,7 +69,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--te
     <video id="video" autoplay playsinline muted></video>
     <div class="frame"><div class="box"><i></i></div></div>
     <div class="laser"></div>
-    <div class="flash" id="flash"></div>
+
     <button class="btn-torch" id="btnTorch" onclick="toggleTorch()" title="Linterna">🔦</button>
     <div class="hint">Pon el código dentro del recuadro, a unos 20 cm, y espera a que enfoque</div>
     <div class="overlay" id="overlay">
@@ -155,11 +149,7 @@ function avisarAgregado(n, texto, prueba){
   const rep=n>1;
   const pre = prueba ? (rep?"🔍 Leído otra vez (van "+n+"): ":"🔍 Leído: ")
                      : (rep?"➕ Añadido otra vez (van "+n+"): ":"➕ Añadido: ");
-  feedback(pre+texto, rep?"rep":"ok");
-  const f=$("flash");
-  f.className="flash"; void f.offsetWidth;
-  f.textContent = rep ? "+1  ×"+n : "+1";
-  f.className="flash "+(rep?"rep":"ok");
+  feedback(pre+texto, "ok");
   try{ if(navigator.vibrate) navigator.vibrate(rep?[70,60,70]:40); }catch(e){}
   actualizarBtnFin();
   resetFeedbackSoon();
